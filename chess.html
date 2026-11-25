@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Шахматы + Stockfish (Сервер)</title>
+<style>
+  body { background:#121212; color:#fff; font-family:Arial,sans-serif; margin:0; padding:10px; display:flex; flex-direction:column; align-items:center; }
+  #board-container { position:relative; width:95vw; max-width:420px; aspect-ratio:1/1; margin-top:15px; border:4px solid #333; border-radius:6px; }
+  .square { position:absolute; width:12.5%; height:12.5%; display:flex; justify-content:center; align-items:center; font-size:38px; user-select:none; box-sizing:border-box; }
+  .light { background:#f0d9b5; }
+  .dark { background:#b58863; }
+  .selected { background:#7cfc00 !important; }
+  .piece { cursor:pointer; }
+  #controls { margin-top:15px; display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+  button { padding:12px 20px; font-size:15px; font-weight:bold; background:#3b82f6; color:#fff; border:none; border-radius:10px; cursor:pointer; }
+  button:disabled { background:#555; }
+  #status { margin-top:12px; font-size:14px; color:#4ade80; font-weight:bold; text-align:center; min-height:18px; }
+  #arrow-layer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+  .legend { display:flex; gap:14px; margin-top:10px; font-size:12px; }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .dot { width:12px; height:12px; border-radius:50%; }
+</style>
+</head>
+<body>
+<div id="board-container"><canvas id="arrow-layer"></canvas></div>
+<div id="status">Загрузка движка...</div>
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#27ae60"></div>Лучший</div>
+  <div class="legend-item"><div class="dot" style="background:#3498db"></div>Бриллиант</div>
+  <div class="legend-item"><div class="dot" style="background:#e74c3c"></div>Зевок</div>
+</div>
+<div id="controls">
+  <button id="btnHint" onclick="runAnalysis()" disabled>Анализ (Stockfish)</button>
+  <button onclick="resetGame()">Сброс</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chess.js@0.10.3/chess.min.js"></script>
+
+<script>
+const boardEl = document.getElementById('board-container');
+const canvas = document.getElementById('arrow-layer');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const btnHint = document.getElementById('btnHint');
+
+let game = new Chess();
+let selectedSquare = null;
+let engine = null;
+let engineReady = false;
+let analyzing = false;
+let currentArrows = [];
+let bestMoveData = [];
+
+const pieces = { p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚', P:'♙', R:'♖', N:'♘', B:'♗', Q:'♕', K:'♔' };
+
+function resizeCanvas(){ canvas.width = boardEl.clientWidth; canvas.height = boardEl.clientHeight; }
+
+function initBoard(){
+  boardEl.querySelectorAll('.square').forEach(e=>e.remove());
+  for(let row=0; row<8; row++){
+    for(let col=0; col<8; col++){
+      const sq = document.createElement('div');
+      sq.className = 'square ' + ((row+col)%2===0?'light':'dark');
+      sq.style.top = (row*12.5)+'%';
+      sq.style.left = (col*12.5)+'%';
+      const file = String.fromCharCode(97+col);
+      const rank = 8-row;
+      sq.dataset.square = file+rank;
+      sq.onclick = ()=>handleSquareClick(file+rank);
+      boardEl.appendChild(sq);
+    }
+  }
+  updateBoardVisuals();
+}
+
+function updateBoardVisuals(){
+  document.querySelectorAll('.square').forEach(sq=>{
+    const name = sq.dataset.square;
+    const p = game.get(name);
+    if(p){
+      const sym = pieces[p.color==='w'?p.type.toUpperCase():p.type];
+      sq.innerHTML = `<span class="piece" style="color:${p.color==='w'?'#fff':'#000'}; -webkit-text-stroke:${p.color==='w'?'1.5px #000':'0'}">${sym}</span>`;
+    } else sq.innerHTML='';
+    sq.classList.toggle('selected', selectedSquare===name);
+  });
+}
+
+function handleSquareClick(name){
+  if(analyzing) return;
+  if(selectedSquare){
+    const mv = game.move({from:selectedSquare, to:name, promotion:'q'});
+    if(mv){
+      selectedSquare=null;
+      updateBoardVisuals();
+      clearArrows();
+      checkGameOver();
+      return;
+    }
+    const p = game.get(name);
+    selectedSquare = (p && p.color===game.turn()) ? name : null;
+    updateBoardVisuals();
+  } else {
+    const p = game.get(name);
+    if(p && p.color===game.turn()){ selectedSquare=name; updateBoardVisuals(); }
+  }
+}
+
+function drawArrow(from,to,color,width){
+  const size = canvas.width/8;
+  const center = sq => {
+    const f = sq.charCodeAt(0)-97;
+    const r = 8-parseInt(sq[1]);
+    return {x:f*size+size/2, y:r*size+size/2};
+  };
+  const s = center(from), e = center(to);
+  ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(e.x,e.y);
+  ctx.strokeStyle = color; ctx.lineWidth = width||8; ctx.lineCap='round'; ctx.stroke();
+  const ang = Math.atan2(e.y-s.y, e.x-s.x);
+  const hl = 16;
+  ctx.beginPath();
+  ctx.moveTo(e.x,e.y);
+  ctx.lineTo(e.x-hl*Math.cos(ang-Math.PI/6), e.y-hl*Math.sin(ang-Math.PI/6));
+  ctx.lineTo(e.x-hl*Math.cos(ang+Math.PI/6), e.y-hl*Math.sin(ang+Math.PI/6));
+  ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+}
+
+function clearArrows(){ currentArrows=[]; ctx.clearRect(0,0,canvas.width,canvas.height); }
+
+function renderArrows(){
+  resizeCanvas();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  currentArrows.forEach(a=>drawArrow(a.from,a.to,a.color,a.width));
+}
+
+function initEngine(){
+  try {
+    // Берем локальный файл из папки сервера
+    engine = new Worker('stockfish.js');
+    
+    engine.onmessage = e => handleEngineMessage(e.data);
+    
+    engine.postMessage('uci');
+    engine.postMessage('setoption name Threads value 1');
+    engine.postMessage('setoption name Hash value 16');
+    engine.postMessage('isready');
+    
+    statusEl.innerText = 'Движок инициализируется (сервер)...';
+  } catch(err){
+    statusEl.innerText = 'Ошибка: Не найден файл stockfish.js!';
+    console.error(err);
+  }
+}
+
+function handleEngineMessage(line){
+  if(typeof line !== 'string') return;
+  
+  if(line === 'readyok'){
+    engineReady = true;
+    btnHint.disabled = false;
+    statusEl.innerText = 'Stockfish готов. Твой ход!';
+    return;
+  }
+  if(line.startsWith('bestmove')){
+    analyzing = false;
+    btnHint.disabled = false;
+    
+    const entries = Object.values(bestMoveData).filter(x=>x && x.move);
+    if(entries.length > 0){
+      entries.sort((a,b)=> b.score - a.score);
+      
+      const best = entries[0];
+      currentArrows.push({from:best.move.slice(0,2), to:best.move.slice(2,4), color:'rgba(39,174,96,0.95)', width:9});
+
+      for(let i=1; i<entries.length; i++){
+        if(Math.abs(entries[i].score - best.score) <= 40 && entries[i].move.length>=4){
+          currentArrows.push({from:entries[i].move.slice(0,2), to:entries[i].move.slice(2,4), color:'rgba(52,152,219,0.95)', width:7});
+          break;
+        }
+      }
+
+      if(entries.length >= 2){
+        const worst = entries[entries.length-1];
+        if(Math.abs(worst.score - best.score) > 150 && worst.move.length>=4){
+          currentArrows.push({from:worst.move.slice(0,2), to:worst.move.slice(2,4), color:'rgba(231,76,60,0.9)', width:6});
+        }
+      }
+      renderArrows();
+      statusEl.innerText = `Оценка: ${(best.score/100).toFixed(2)} | Лучший: ${best.move}`;
+    } else {
+      statusEl.innerText = 'Анализ завершен, но ходов нет.';
+    }
+    bestMoveData = [];
+    return;
+  }
+
+  if(line.includes('multipv')){
+    const mpvMatch = line.match(/multipv (\d+)/);
+    const cpMatch = line.match(/score cp (-?\d+)/);
+    const mateMatch = line.match(/score mate (-?\d+)/);
+    const pvMatch = line.match(/ pv (\S+)/);
+    if(mpvMatch && (cpMatch || mateMatch) && pvMatch){
+      const idx = parseInt(mpvMatch[1]);
+      let score;
+      if(mateMatch){
+        const m = parseInt(mateMatch[1]);
+        score = m > 0 ? 10000 - m*10 : -10000 - m*10;
+      } else {
+        score = parseInt(cpMatch[1]);
+      }
+      const sign = game.turn() === 'w' ? 1 : -1;
+      bestMoveData[idx] = {score: score * sign, move: pvMatch[1]};
+    }
+  }
+}
+
+function runAnalysis(){
+  if(!engineReady || analyzing) return;
+  if(game.game_over()){ statusEl.innerText='Игра окончена.'; return; }
+  analyzing = true;
+  btnHint.disabled = true;
+  clearArrows();
+  bestMoveData = [];
+  statusEl.innerText = 'Думаю... (глубина 12)';
+
+  engine.postMessage('setoption name MultiPV value 3');
+  engine.postMessage('position fen ' + game.fen());
+  engine.postMessage('go depth 12');
+}
+
+function checkGameOver(){
+  if(game.game_over()){
+    statusEl.innerText = game.in_checkmate() ? 'МАТ! Игра окончена.' : 'Ничья.';
+  } else {
+    statusEl.innerText = 'Твой ход!';
+  }
+}
+
+function resetGame(){
+  game = new Chess();
+  selectedSquare = null;
+  clearArrows();
+  updateBoardVisuals();
+  statusEl.innerText = engineReady ? 'Игра сброшена. Твой ход!' : 'Движок ещё грузится...';
+}
+
+window.onload = () => {
+  initBoard();
+  resizeCanvas();
+  initEngine();
+};
+window.onresize = () => { resizeCanvas(); renderArrows(); };
+</script>
+</body>
+</html>
