@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Шахматы + Stockfish (Сервер)</title>
+<title>Шахматы + Stockfish (GitHub)</title>
 <style>
   body { background:#121212; color:#fff; font-family:Arial,sans-serif; margin:0; padding:10px; display:flex; flex-direction:column; align-items:center; }
   #board-container { position:relative; width:95vw; max-width:420px; aspect-ratio:1/1; margin-top:15px; border:4px solid #333; border-radius:6px; }
@@ -135,17 +135,27 @@ function renderArrows(){
 
 function initEngine(){
   try {
-    // Берем локальный файл из папки сервера
+    // Загружаем локальный файл
     engine = new Worker('stockfish.js');
     
     engine.onmessage = e => handleEngineMessage(e.data);
     
+    // Отправляем команды
     engine.postMessage('uci');
     engine.postMessage('setoption name Threads value 1');
     engine.postMessage('setoption name Hash value 16');
     engine.postMessage('isready');
     
-    statusEl.innerText = 'Движок инициализируется (сервер)...';
+    statusEl.innerText = 'Инициализация движка...';
+    
+    // Страховка: если через 3 секунды движок не ответил, пробуем еще раз
+    setTimeout(() => {
+      if(!engineReady){
+        engine.postMessage('uci');
+        engine.postMessage('isready');
+      }
+    }, 3000);
+
   } catch(err){
     statusEl.innerText = 'Ошибка: Не найден файл stockfish.js!';
     console.error(err);
@@ -155,12 +165,14 @@ function initEngine(){
 function handleEngineMessage(line){
   if(typeof line !== 'string') return;
   
-  if(line === 'readyok'){
+  // Если видим 'readyok' — движок жив
+  if(line.trim() === 'readyok'){
     engineReady = true;
     btnHint.disabled = false;
     statusEl.innerText = 'Stockfish готов. Твой ход!';
     return;
   }
+  
   if(line.startsWith('bestmove')){
     analyzing = false;
     btnHint.disabled = false;
