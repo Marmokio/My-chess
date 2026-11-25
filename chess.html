@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Шахматы + Stockfish (Debug)</title>
+<title>Шахматы + Stockfish</title>
 <style>
   body { background:#121212; color:#fff; font-family:Arial,sans-serif; margin:0; padding:10px; display:flex; flex-direction:column; align-items:center; }
   #board-container { position:relative; width:95vw; max-width:420px; aspect-ratio:1/1; margin-top:15px; border:4px solid #333; border-radius:6px; }
@@ -17,17 +17,23 @@
   button:disabled { background:#555; }
   #status { margin-top:12px; font-size:14px; color:#4ade80; font-weight:bold; text-align:center; min-height:18px; }
   #arrow-layer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
-  #debug-log { width:95vw; max-width:420px; height:100px; background:#000; color:#0f0; font-family:monospace; font-size:10px; overflow-y:auto; margin-top:10px; padding:5px; border:1px solid #333; }
+  .legend { display:flex; gap:14px; margin-top:10px; font-size:12px; }
+  .legend-item { display:flex; align-items:center; gap:5px; }
+  .dot { width:12px; height:12px; border-radius:50%; }
 </style>
 </head>
 <body>
 <div id="board-container"><canvas id="arrow-layer"></canvas></div>
 <div id="status">Загрузка движка...</div>
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#27ae60"></div>Лучший</div>
+  <div class="legend-item"><div class="dot" style="background:#3498db"></div>Бриллиант</div>
+  <div class="legend-item"><div class="dot" style="background:#e74c3c"></div>Зевок</div>
+</div>
 <div id="controls">
-  <button id="btnHint" onclick="runAnalysis()" disabled>Анализ</button>
+  <button id="btnHint" onclick="runAnalysis()" disabled>Анализ (Stockfish)</button>
   <button onclick="resetGame()">Сброс</button>
 </div>
-<div id="debug-log">Логи загрузки...</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chess.js@0.10.3/chess.min.js"></script>
 
@@ -37,13 +43,6 @@ const canvas = document.getElementById('arrow-layer');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const btnHint = document.getElementById('btnHint');
-const logEl = document.getElementById('debug-log');
-
-function log(msg) {
-    console.log(msg);
-    logEl.innerText += msg + "\n";
-    logEl.scrollTop = logEl.scrollHeight;
-}
 
 let game = new Chess();
 let selectedSquare = null;
@@ -51,7 +50,7 @@ let engine = null;
 let engineReady = false;
 let analyzing = false;
 let currentArrows = [];
-let bestMoveData = [];
+let bestMoveData = {};
 
 const pieces = { p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚', P:'♙', R:'♖', N:'♘', B:'♗', Q:'♕', K:'♔' };
 
@@ -135,44 +134,29 @@ function renderArrows(){
 }
 
 function initEngine(){
-  log("Создаем Worker...");
   statusEl.innerText = 'Загрузка движка...';
   try {
     engine = new Worker('stockfish.js');
     
-    engine.onmessage = e => {
-      handleEngineMessage(e.data);
-    };
+    engine.onmessage = e => handleEngineMessage(e.data);
     
-    engine.onerror = e => {
-      log("ОШИБКА WORKER: " + JSON.stringify(e));
-      statusEl.innerText = 'Ошибка загрузки скрипта движка.';
-    };
-    
-    log("Отправляем uci и isready...");
     engine.postMessage('uci');
-    engine.postMessage('setoption name MultiPV value 3');
+    engine.postMessage('setoption name Threads value 1');
+    engine.postMessage('setoption name Hash value 16');
     engine.postMessage('isready');
     
   } catch(err){
-    log("ОШИБКА СОЗДАНИЯ: " + err.message);
-    statusEl.innerText = 'Ошибка: ' + err.message;
+    statusEl.innerText = 'Ошибка: Не найден файл stockfish.js!';
   }
 }
 
 function handleEngineMessage(line){
   if(typeof line !== 'string') return;
   
-  // Логируем всё, что шлет движок (чтобы понять, жив ли он)
-  if(line.includes('readyok') || line.includes('bestmove') || line.includes('uciok')) {
-      log("ОТВЕТ: " + line);
-  }
-  
   if(line.trim() === 'readyok'){
     engineReady = true;
     btnHint.disabled = false;
     statusEl.innerText = 'Stockfish готов. Твой ход!';
-    log("УСПЕХ! Движок инициализирован.");
     return;
   }
   
@@ -180,10 +164,14 @@ function handleEngineMessage(line){
     analyzing = false;
     btnHint.disabled = false;
     
+    const bestMoveStr = line.split(' ')[1];
     const entries = Object.values(bestMoveData).filter(x=>x && x.move);
+    
+    // Если движок прислал оценки — строим 3 стрелки
     if(entries.length > 0){
       entries.sort((a,b)=> b.score - a.score);
       const best = entries[0];
+      
       currentArrows.push({from:best.move.slice(0,2), to:best.move.slice(2,4), color:'rgba(39,174,96,0.95)', width:9});
 
       for(let i=1; i<entries.length; i++){
@@ -199,15 +187,20 @@ function handleEngineMessage(line){
           currentArrows.push({from:worst.move.slice(0,2), to:worst.move.slice(2,4), color:'rgba(231,76,60,0.9)', width:6});
         }
       }
-      renderArrows();
       statusEl.innerText = `Оценка: ${(best.score/100).toFixed(2)} | Лучший: ${best.move}`;
-    } else {
-      statusEl.innerText = 'Анализ завершен, но ходов нет.';
+    } 
+    // Если оценок нет, но движок сказал лучший ход — рисуем хотя бы зеленую стрелку
+    else if (bestMoveStr && bestMoveStr !== '(none)') {
+      currentArrows.push({from:bestMoveStr.slice(0,2), to:bestMoveStr.slice(2,4), color:'rgba(39,174,96,0.95)', width:9});
+      statusEl.innerText = `Лучший ход: ${bestMoveStr}`;
     }
-    bestMoveData = [];
+    
+    renderArrows();
+    bestMoveData = {};
     return;
   }
 
+  // Собираем мультиPV
   if(line.includes('multipv')){
     const mpvMatch = line.match(/multipv (\d+)/);
     const cpMatch = line.match(/score cp (-?\d+)/);
@@ -234,10 +227,10 @@ function runAnalysis(){
   analyzing = true;
   btnHint.disabled = true;
   clearArrows();
-  bestMoveData = [];
+  bestMoveData = {};
   statusEl.innerText = 'Думаю... (глубина 12)';
-  log("Запуск анализа...");
   
+  engine.postMessage('setoption name MultiPV value 3');
   engine.postMessage('position fen ' + game.fen());
   engine.postMessage('go depth 12');
 }
